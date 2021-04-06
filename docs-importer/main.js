@@ -8,6 +8,12 @@ const preferences = require('preferences');
 const fs = require('fs');
 const argv = require('minimist')(process.argv);
 const _ = require('underscore');
+const nodeFetch = require('node-fetch');
+const fetch = require('fetch-cookie')(nodeFetch);
+const { URLSearchParams } = require('url');
+
+const { get, post, put } = require("./request");
+
 const request = require('request').defaults({
   jar: true
 });
@@ -47,16 +53,18 @@ const askBaseUrl = () => {
       text: 'Checking connection to Teedy',
       spinner: 'flips'
     }).start();
-    request(answers.baseUrl + '/api/app', function (error, response) {
-      if (!response || response.statusCode !== 200) {
-        spinner.fail('Connection to Teedy failed: ' + error);
-        askBaseUrl();
-        return;
-      }
 
-      spinner.succeed('Connection OK');
-      askCredentials();
-    });
+    get(answers.baseUrl + '/api/app')
+        .then(json => {
+          console.log(json);
+          spinner.succeed('Connection OK');
+          askCredentials();
+        })
+        .catch(error => {
+            spinner.fail('Connection to Teedy failed: ' + error);
+            askBaseUrl();
+            return;
+        });
   });
 };
 
@@ -83,27 +91,30 @@ const askCredentials = () => {
     prefs.importer.password = answers.password;
 
     // Test credentials
+    console.log('checking connection to Teedy');
     const spinner = ora({
       text: 'Checking connection to Teedy',
       spinner: 'flips'
     }).start();
-    request.post({
-      url: prefs.importer.baseUrl + '/api/user/login',
-      form: {
-        username: answers.username,
-        password: answers.password,
-        remember: true
-      }
-    }, function (error, response) {
-      if (error || !response || response.statusCode !== 200) {
+
+    const data = {
+      username: answers.username,
+      password: answers.password,
+      remember: true
+    }
+
+    post(prefs.importer.baseUrl + '/api/user/login', data)
+      .then(json => {
+        spinner.succeed('Authentication OK');
+        console.log('Authentication OK');
+        console.dir(json);
+        askPath();
+      })
+      .catch(error => {
         spinner.fail('Username or password incorrect');
         askCredentials();
         return;
-      }
-
-      spinner.succeed('Authentication OK');
-      askPath();
-    });
+      })
   });
 };
 
@@ -123,12 +134,14 @@ const askPath = () => {
     prefs.importer.path = answers.path;
 
     // Test path
+    console.log('checking import path');
     const spinner = ora({
       text: 'Checking import path',
       spinner: 'flips'
     }).start();
     fs.lstat(answers.path, (error, stats) => {
       if (error || !stats.isDirectory()) {
+      console.log('directory path not valid');
         spinner.fail('Please enter a valid directory path');
         askPath();
         return;
@@ -136,6 +149,7 @@ const askPath = () => {
 
       fs.access(answers.path, fs.W_OK | fs.R_OK, (error) => {
         if (error) {
+        console.log('directory not writable');
           spinner.fail('This directory is not writable');
           askPath();
           return;
@@ -179,35 +193,38 @@ const askTag = () => {
     spinner: 'flips'
   }).start();
 
-  request.get({
-    url: prefs.importer.baseUrl + '/api/tag/list',
-  }, function (error, response, body) {
-    if (error || !response || response.statusCode !== 200) {
-      spinner.fail('Error loading tags');
+
+  get(prefs.importer.baseUrl + '/api/tag/list')
+    .then(json => {
+
+      spinner.succeed('Tags loaded');
+      console.dir(json);
+      const tags = json.tags;
+      const defaultTag = _.findWhere(tags, { id: prefs.importer.tag });
+      const defaultTagName = defaultTag ? defaultTag.name : 'No tag';
+
+      inquirer.prompt([
+        {
+          type: 'list',
+          name: 'tag',
+          message: 'Which tag to add to all imported documents?',
+          default: defaultTagName,
+          choices: [ 'No tag' ].concat(_.pluck(tags, 'name'))
+        }
+      ]).then(answers => {
+        // Save tag
+        prefs.importer.tag = answers.tag === 'No tag' ?
+          '' : _.findWhere(tags, { name: answers.tag }).id;
+        askAddTag();
+      });
+
+    })
+    .catch(error => {
+      spinner.fail('Error loading tags\n');
+      console.log(error.statusText);
       askTag();
-      return;
-    }
-
-    spinner.succeed('Tags loaded');
-    const tags = JSON.parse(body).tags;
-    const defaultTag = _.findWhere(tags, { id: prefs.importer.tag });
-    const defaultTagName = defaultTag ? defaultTag.name : 'No tag';
-
-    inquirer.prompt([
-      {
-        type: 'list',
-        name: 'tag',
-        message: 'Which tag to add to all imported documents?',
-        default: defaultTagName,
-        choices: [ 'No tag' ].concat(_.pluck(tags, 'name'))
-      }
-    ]).then(answers => {
-      // Save tag
-      prefs.importer.tag = answers.tag === 'No tag' ?
-        '' : _.findWhere(tags, { name: answers.tag }).id;
-      askAddTag();
     });
-  });
+
 };
 
 
@@ -232,7 +249,6 @@ const askAddTag = () => {
 
 
 const askLang = () => {
-  console.log('');
 
   // Load tags
   const spinner = ora({
@@ -240,34 +256,33 @@ const askLang = () => {
     spinner: 'flips'
   }).start();
 
-  request.get({
-    url: prefs.importer.baseUrl + '/api/app',
-  }, function (error, response, body) {
-    if (error || !response || response.statusCode !== 200) {
+  get(prefs.importer.baseUrl + '/api/app')
+    .then(json => {
+      spinner.succeed('Language loaded');
+      const defaultLang = prefs.importer.lang ? prefs.importer.lang : json.default_language;
+
+      inquirer.prompt([
+        {
+          type: 'input',
+          name: 'lang',
+          message: 'Which should be the default language of the document?',
+          default: defaultLang
+        }
+      ]).then(answers => {
+        // Save tag
+        prefs.importer.lang = answers.lang
+        askCopyFolder();
+      });
+
+    })
+    .catch(error => {
       spinner.fail('Connection to Teedy failed: ' + error);
       askLang();
-      return;
-    }
-    spinner.succeed('Language loaded');
-    const defaultLang = prefs.importer.lang ? prefs.importer.lang : JSON.parse(body).default_language;
+    })
 
-    inquirer.prompt([
-      {
-        type: 'input',
-        name: 'lang',
-        message: 'Which should be the default language of the document?',
-        default: defaultLang
-      }
-    ]).then(answers => {
-      // Save tag
-      prefs.importer.lang = answers.lang
-      askCopyFolder();
-    });
-  });
 };
 
 const askCopyFolder = () => {
-  console.log('');
 
   inquirer.prompt([
     {
@@ -332,41 +347,48 @@ const askDaemon = () => {
 
 // Start the importer
 const start = () => {
-  request.post({
-    url: prefs.importer.baseUrl + '/api/user/login',
-    form: {
-      username: prefs.importer.username,
-      password: prefs.importer.password,
-      remember: true
-    }
-  }, function (error, response) {
-    if (error || !response || response.statusCode !== 200) {
+
+  console.log('start(), logging in');
+
+  const data = {
+    username: prefs.importer.username,
+    password: prefs.importer.password,
+    remember: true
+  }
+
+  
+  post(prefs.importer.baseUrl + '/api/user/login', data)
+    .then(() => {
+      // Start the actual import
+      if (prefs.importer.daemon) {
+        console.log('\nPolling the input folder for new files...');
+
+        let resolve = () => {
+          importFiles(true, () => {
+            setTimeout(resolve, 30000);
+          });
+        };
+        resolve();
+      } else {
+        importFiles(false, () => {});
+      }
+
+    }).catch(error => {
       console.error('\nUsername or password incorrect');
-      return;
-    }
+    });
 
-    // Start the actual import
-    if (prefs.importer.daemon) {
-      console.log('\nPolling the input folder for new files...');
-
-      let resolve = () => {
-        importFiles(true, () => {
-          setTimeout(resolve, 30000);
-        });
-      };
-      resolve();
-    } else {
-      importFiles(false, () => {});
-    }
-  });
 };
 
 // Import the files
 const importFiles = (remove, filesImported) => {
+  console.log('importing files');
   recursive(prefs.importer.path, function (error, files) {
 
     files = files.filter(minimatch.filter(prefs.importer.fileFilter || '*', { matchBase: true }));
+
+    console.log('found ' + files.length + ' files');
     if (files.length === 0) {
+    console.log('no files found');
       filesImported();
       return;
     }
@@ -386,6 +408,7 @@ const importFiles = (remove, filesImported) => {
 
 // Import a file
 const importFile = (file, remove, resolve) => {
+console.log('importing file ' + file);
   const spinner = ora({
     text: 'Importing: ' + file,
     spinner: 'flips'
@@ -394,93 +417,93 @@ const importFile = (file, remove, resolve) => {
   // Remove path of file
   let filename = file.replace(/^.*[\\\/]/, '');
 
+  console.log('filename: ' + filename);
+
   // Get Tags given as hashtags from filename
   let taglist = filename.match(/#[^\s:#]+/mg);
   taglist = taglist ? taglist.map(s => s.substr(1)) : [];
+
+  console.log('taglist: ' + taglist.join(','));
   
   // Get available tags and UUIDs from server
-  request.get({
-      url: prefs.importer.baseUrl + '/api/tag/list',
-    }, function (error, response, body) {
-    if (error || !response || response.statusCode !== 200) {
-      spinner.fail('Error loading tags');
-      return;
-    }
-    
-    let tagsarray = {};
-    for (let l of JSON.parse(body).tags) {
-      tagsarray[l.name] = l.id;
-    }
+  console.log('loading tags');
+  console.log(prefs.importer.baseUrl + '/api/tag/list');
 
-    // Intersect tags from filename with existing tags on server
-    let foundtags = [];
-    for (let j of taglist) {
-      // If the tag is last in the filename it could include a file extension and would not be recognized
-      if (j.includes('.') && !tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
-        while (j.includes('.') && !tagsarray.hasOwnProperty(j)) {
-          j = j.replace(/\.[^.]*$/,'');
+  get(prefs.importer.baseUrl + '/api/tag/list')
+    .then(json => {
+      let tagsarray = {};
+      for (let l of json.tags) {
+        tagsarray[l.name] = l.id;
+      }
+
+      // Intersect tags from filename with existing tags on server
+      let foundtags = [];
+      for (let j of taglist) {
+        // If the tag is last in the filename it could include a file extension and would not be recognized
+        if (j.includes('.') && !tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
+          while (j.includes('.') && !tagsarray.hasOwnProperty(j)) {
+            j = j.replace(/\.[^.]*$/,'');
+          }
+        }
+        if (tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
+          foundtags.push(tagsarray[j]);
+          filename = filename.split('#'+j).join('');
         }
       }
-      if (tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
-        foundtags.push(tagsarray[j]);
-        filename = filename.split('#'+j).join('');
-      }
-    }
-    if (prefs.importer.tag !== '' && !foundtags.includes(prefs.importer.tag)){
-      foundtags.push(prefs.importer.tag);
-    }
-    
-    let data = {}
-    if (prefs.importer.addtags) {
-      data = {
-        title: prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
-        language: prefs.importer.lang || 'eng',
-        tags: foundtags 
-      }
-    }
-    else {
-      data = {
-        title: prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
-        language: prefs.importer.lang || 'eng',
-        tags: prefs.importer.tag === '' ? undefined : prefs.importer.tag
-      }
-    }
-    // Create document
-    request.put({
-      url: prefs.importer.baseUrl + '/api/document',
-      form: qs.stringify(data)
-    }, function (error, response, body) {
-      if (error || !response || response.statusCode !== 200) {
-        spinner.fail('Upload failed for ' + file + ': ' + error);
-        resolve();
-        return;
+      if (prefs.importer.tag !== '' && !foundtags.includes(prefs.importer.tag)){
+        foundtags.push(prefs.importer.tag);
       }
       
-      // Upload file
-      request.put({
-        url: prefs.importer.baseUrl + '/api/file',
-        formData: {
-          id: JSON.parse(body).id,
-          file: fs.createReadStream(file)
-        }
-      }, function (error, response) {
-        if (error || !response || response.statusCode !== 200) {
-          spinner.fail('Upload failed for ' + file + ': ' + error);
+      let data = { 
+        'title': prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
+        'language': prefs.importer.lang || 'eng'
+      }
+
+      if (prefs.importer.addtags) {
+        data.tags = foundtags;
+      }
+      else {
+        data.tags = prefs.importer.tag === '' ? undefined : prefs.importer.tag;
+      }
+
+      console.log('creating document');
+      // Create document
+      put(prefs.importer.baseUrl + '/api/document', data)
+        .then(json => {
+          // Upload file
+          console.log('uploading file');
+
+          put(prefs.importer.baseUrl + '/api/file', fs.createReadStream(file))
+            .then(json => {
+              spinner.succeed('Upload successful for ' + file);
+              console.log('Upload successful for ' + file);
+              if (remove) {
+                if (prefs.importer.copyFolder) {
+                  fs.copyFileSync(file, prefs.importer.copyFolder + file.replace(/^.*[\\\/]/, ''));
+                  fs.unlinkSync(file);
+                }
+                else {fs.unlinkSync(file);}
+              }
+              resolve();
+            })
+            .catch(error => {
+              console.log('Upload failed for ' + file + ': ' + error.statusText);
+              spinner.fail('Upload failed for ' + file + ': ' + error.statusText);
+              resolve();
+            });
+          })
+        .catch(error => {
+          console.log('Upload failed for ' + file + ': ' + error.statusText);
+          spinner.fail('Upload failed for ' + file + ': ' + error.statusText);
           resolve();
-          return;
-        }
-        spinner.succeed('Upload successful for ' + file);
-        if (remove) {
-          if (prefs.importer.copyFolder) {
-            fs.copyFileSync(file, prefs.importer.copyFolder + file.replace(/^.*[\\\/]/, ''));
-            fs.unlinkSync(file);
-          }
-          else {fs.unlinkSync(file);}
-        }
+
+        })
+        })
+      .catch(error => {
+        spinner.fail('Error loading tags');
+        console.dir(error);
         resolve();
-      });
-    });
-  });
+      })
 };
 
 // Entrypoint: daemon mode or wizard
