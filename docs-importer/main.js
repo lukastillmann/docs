@@ -10,14 +10,19 @@ const argv = require('minimist')(process.argv);
 const _ = require('underscore');
 const nodeFetch = require('node-fetch');
 const fetch = require('fetch-cookie')(nodeFetch);
-const { URLSearchParams } = require('url');
 
-const { get, post, put } = require("./request");
+const { get, post, put, putFile } = require("./request");
 
 const request = require('request').defaults({
   jar: true
 });
 const qs = require('querystring');
+
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+    
 
 // Load preferences
 const prefs = new preferences('com.sismics.docs.importer',{
@@ -56,7 +61,6 @@ const askBaseUrl = () => {
 
     get(answers.baseUrl + '/api/app')
         .then(json => {
-          console.log(json);
           spinner.succeed('Connection OK');
           askCredentials();
         })
@@ -70,7 +74,6 @@ const askBaseUrl = () => {
 
 // Ask for credentials
 const askCredentials = () => {
-  console.log('');
 
   inquirer.prompt([
     {
@@ -106,8 +109,6 @@ const askCredentials = () => {
     post(prefs.importer.baseUrl + '/api/user/login', data)
       .then(json => {
         spinner.succeed('Authentication OK');
-        console.log('Authentication OK');
-        console.dir(json);
         askPath();
       })
       .catch(error => {
@@ -120,7 +121,6 @@ const askCredentials = () => {
 
 // Ask for the path
 const askPath = () => {
-  console.log('');
 
   inquirer.prompt([
     {
@@ -134,14 +134,12 @@ const askPath = () => {
     prefs.importer.path = answers.path;
 
     // Test path
-    console.log('checking import path');
     const spinner = ora({
       text: 'Checking import path',
       spinner: 'flips'
     }).start();
     fs.lstat(answers.path, (error, stats) => {
       if (error || !stats.isDirectory()) {
-      console.log('directory path not valid');
         spinner.fail('Please enter a valid directory path');
         askPath();
         return;
@@ -149,7 +147,6 @@ const askPath = () => {
 
       fs.access(answers.path, fs.W_OK | fs.R_OK, (error) => {
         if (error) {
-        console.log('directory not writable');
           spinner.fail('This directory is not writable');
           askPath();
           return;
@@ -166,7 +163,6 @@ const askPath = () => {
 
 // Ask for the file filter
 const askFileFilter = () => {
-  console.log('');
 
   inquirer.prompt([
     {
@@ -185,7 +181,6 @@ const askFileFilter = () => {
 
 // Ask for the tag to add
 const askTag = () => {
-  console.log('');
 
   // Load tags
   const spinner = ora({
@@ -198,7 +193,6 @@ const askTag = () => {
     .then(json => {
 
       spinner.succeed('Tags loaded');
-      console.dir(json);
       const tags = json.tags;
       const defaultTag = _.findWhere(tags, { id: prefs.importer.tag });
       const defaultTagName = defaultTag ? defaultTag.name : 'No tag';
@@ -220,8 +214,7 @@ const askTag = () => {
 
     })
     .catch(error => {
-      spinner.fail('Error loading tags\n');
-      console.log(error.statusText);
+      spinner.fail('Error loading tags\n' + error.statusText);
       askTag();
     });
 
@@ -229,7 +222,6 @@ const askTag = () => {
 
 
 const askAddTag = () => {
-  console.log('');
 
   inquirer.prompt([
     {
@@ -325,7 +317,6 @@ const askCopyFolder = () => {
 
 // Ask for daemon mode
 const askDaemon = () => {
-  console.log('');
 
   inquirer.prompt([
     {
@@ -347,8 +338,6 @@ const askDaemon = () => {
 
 // Start the importer
 const start = () => {
-
-  console.log('start(), logging in');
 
   const data = {
     username: prefs.importer.username,
@@ -381,14 +370,11 @@ const start = () => {
 
 // Import the files
 const importFiles = (remove, filesImported) => {
-  console.log('importing files');
   recursive(prefs.importer.path, function (error, files) {
 
     files = files.filter(minimatch.filter(prefs.importer.fileFilter || '*', { matchBase: true }));
 
-    console.log('found ' + files.length + ' files');
     if (files.length === 0) {
-    console.log('no files found');
       filesImported();
       return;
     }
@@ -408,7 +394,6 @@ const importFiles = (remove, filesImported) => {
 
 // Import a file
 const importFile = (file, remove, resolve) => {
-console.log('importing file ' + file);
   const spinner = ora({
     text: 'Importing: ' + file,
     spinner: 'flips'
@@ -417,93 +402,87 @@ console.log('importing file ' + file);
   // Remove path of file
   let filename = file.replace(/^.*[\\\/]/, '');
 
-  console.log('filename: ' + filename);
-
   // Get Tags given as hashtags from filename
   let taglist = filename.match(/#[^\s:#]+/mg);
   taglist = taglist ? taglist.map(s => s.substr(1)) : [];
 
-  console.log('taglist: ' + taglist.join(','));
-  
   // Get available tags and UUIDs from server
-  console.log('loading tags');
-  console.log(prefs.importer.baseUrl + '/api/tag/list');
+  // wait a second for the login process to be finished on the server side
+  sleep(1000).then(() => {
+    get(prefs.importer.baseUrl + '/api/tag/list')
+      .then(json => {
+        let tagsarray = {};
+        for (let l of json.tags) {
+          tagsarray[l.name] = l.id;
+        }
 
-  get(prefs.importer.baseUrl + '/api/tag/list')
-    .then(json => {
-      let tagsarray = {};
-      for (let l of json.tags) {
-        tagsarray[l.name] = l.id;
-      }
-
-      // Intersect tags from filename with existing tags on server
-      let foundtags = [];
-      for (let j of taglist) {
-        // If the tag is last in the filename it could include a file extension and would not be recognized
-        if (j.includes('.') && !tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
-          while (j.includes('.') && !tagsarray.hasOwnProperty(j)) {
-            j = j.replace(/\.[^.]*$/,'');
+        // Intersect tags from filename with existing tags on server
+        let foundtags = [];
+        for (let j of taglist) {
+          // If the tag is last in the filename it could include a file extension and would not be recognized
+          if (j.includes('.') && !tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
+            while (j.includes('.') && !tagsarray.hasOwnProperty(j)) {
+              j = j.replace(/\.[^.]*$/,'');
+            }
+          }
+          if (tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
+            foundtags.push(tagsarray[j]);
+            filename = filename.split('#'+j).join('');
           }
         }
-        if (tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
-          foundtags.push(tagsarray[j]);
-          filename = filename.split('#'+j).join('');
+        if (prefs.importer.tag !== '' && !foundtags.includes(prefs.importer.tag)){
+          foundtags.push(prefs.importer.tag);
         }
-      }
-      if (prefs.importer.tag !== '' && !foundtags.includes(prefs.importer.tag)){
-        foundtags.push(prefs.importer.tag);
-      }
-      
-      let data = { 
-        'title': prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
-        'language': prefs.importer.lang || 'eng'
-      }
+        
+        let data = { 
+          'title': prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
+          'language': prefs.importer.lang || 'eng'
+        }
 
-      if (prefs.importer.addtags) {
-        data.tags = foundtags;
-      }
-      else {
-        data.tags = prefs.importer.tag === '' ? undefined : prefs.importer.tag;
-      }
+        if (prefs.importer.addtags) {
+          data.tags = foundtags;
+        }
+        else {
+          data.tags = prefs.importer.tag === '' ? undefined : prefs.importer.tag;
+        }
 
-      console.log('creating document');
-      // Create document
-      put(prefs.importer.baseUrl + '/api/document', data)
-        .then(json => {
-          // Upload file
-          console.log('uploading file');
-
-          put(prefs.importer.baseUrl + '/api/file', fs.createReadStream(file))
-            .then(json => {
-              spinner.succeed('Upload successful for ' + file);
-              console.log('Upload successful for ' + file);
-              if (remove) {
-                if (prefs.importer.copyFolder) {
-                  fs.copyFileSync(file, prefs.importer.copyFolder + file.replace(/^.*[\\\/]/, ''));
-                  fs.unlinkSync(file);
+        // Create document
+        put(prefs.importer.baseUrl + '/api/document', data)
+          .then(json => {
+            // Upload file
+            const fileData = {
+              id: json.id,
+              file: fs.createReadStream(file)
+            }
+            sleep(1000).then(() => {putFile(prefs.importer.baseUrl + '/api/file', fileData)
+              .then(json => {
+                spinner.succeed('Upload successful for ' + file);
+                if (remove) {
+                  if (prefs.importer.copyFolder) {
+                    fs.copyFileSync(file, prefs.importer.copyFolder + file.replace(/^.*[\\\/]/, ''));
+                    fs.unlinkSync(file);
+                  }
+                  else {fs.unlinkSync(file);}
                 }
-                else {fs.unlinkSync(file);}
-              }
-              resolve();
+                resolve();
+              })
+              .catch(error => {
+                spinner.fail('Upload failed for ' + file + ': ' + error.message);
+                resolve();
+              })
+              });
             })
-            .catch(error => {
-              console.log('Upload failed for ' + file + ': ' + error.statusText);
-              spinner.fail('Upload failed for ' + file + ': ' + error.statusText);
-              resolve();
-            });
+          .catch(error => {
+            spinner.fail('Upload failed for ' + file + ': ' + error.message);
+            resolve();
+
+          })
           })
         .catch(error => {
-          console.log('Upload failed for ' + file + ': ' + error.statusText);
-          spinner.fail('Upload failed for ' + file + ': ' + error.statusText);
+          spinner.fail('Error loading tags');
           resolve();
-
         })
-        })
-      .catch(error => {
-        spinner.fail('Error loading tags');
-        console.dir(error);
-        resolve();
-      })
+  })
 };
 
 // Entrypoint: daemon mode or wizard
